@@ -73,8 +73,11 @@ git push -u origin main
 
 1. New Project → Deploy from GitHub repo.
 2. Добавь Variables из `.env`.
-3. Start command уже задан в `railway.json`: `python -m app.main`.
+3. В проект добавлен `Dockerfile`, Railway будет собирать контейнер без `mise`/python-build-standalone.
+4. Start command внутри контейнера: `python -m app.main`.
 4. После деплоя открой Telegram и отправь `/setup`.
+
+Если ранее был DNS-fail при установке Python через `mise`, просто запусти redeploy — теперь используется Docker-сборка.
 
 ---
 
