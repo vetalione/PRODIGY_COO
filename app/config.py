@@ -14,6 +14,12 @@ class Settings:
     bot_timezone: str
     openai_api_key: str
     openai_model: str
+    memory_embed_model: str
+    database_url: str | None
+    redis_url: str | None
+    memory_enabled: bool
+    memory_recent_turns: int
+    memory_semantic_k: int
     notion_token: str
     notion_parent_page_id: str | None
     notion_source_db_ids: list[str]
@@ -44,6 +50,9 @@ def load_settings() -> Settings:
     source_db_ids_raw = os.getenv("NOTION_SOURCE_DB_IDS", "").strip()
     source_db_ids = [x.replace("-", "").strip() for x in source_db_ids_raw.split(",") if x.strip()]
 
+    memory_enabled_raw = os.getenv("MEMORY_ENABLED", "true").strip().lower()
+    memory_enabled = memory_enabled_raw in {"1", "true", "yes", "on"}
+
     return Settings(
         telegram_bot_token=telegram_bot_token,
         telegram_allowed_user_id=allowed_user,
@@ -51,6 +60,12 @@ def load_settings() -> Settings:
         bot_timezone=os.getenv("BOT_TIMEZONE", "Europe/Moscow").strip(),
         openai_api_key=openai_api_key,
         openai_model=os.getenv("OPENAI_MODEL", "gpt-5.3").strip(),
+        memory_embed_model=os.getenv("MEMORY_EMBED_MODEL", "text-embedding-3-small").strip(),
+        database_url=(os.getenv("DATABASE_URL", "").strip() or None),
+        redis_url=(os.getenv("REDIS_URL", "").strip() or None),
+        memory_enabled=memory_enabled,
+        memory_recent_turns=int(os.getenv("MEMORY_RECENT_TURNS", "10").strip()),
+        memory_semantic_k=int(os.getenv("MEMORY_SEMANTIC_K", "6").strip()),
         notion_token=notion_token,
         notion_parent_page_id=notion_parent_page_id,
         notion_source_db_ids=source_db_ids,

@@ -49,6 +49,12 @@ python -m app.main
 Опционально:
 - `NOTION_PARENT_PAGE_ID` (если пусто или недоступен, бот создаст `COO Workspace` в корне workspace)
 - `NOTION_SOURCE_DB_IDS` (через запятую: список database IDs для чтения контекста)
+- `MEMORY_ENABLED` (`true|false`, по умолчанию `true`)
+- `DATABASE_URL` (Railway Postgres)
+- `REDIS_URL` (Railway Redis)
+- `MEMORY_RECENT_TURNS` (сколько последних сообщений хранить в short-term)
+- `MEMORY_SEMANTIC_K` (сколько фактов возвращать из semantic memory)
+- `MEMORY_EMBED_MODEL` (по умолчанию `text-embedding-3-small`)
 
 Рекомендуется:
 - `TELEGRAM_ALLOWED_USER_ID` (чтобы только ты имел доступ)
@@ -80,6 +86,12 @@ python -m app.main
 - Запись/планирование: в рабочее пространство агента (`COO Workspace`, `COO Tasks`, `COO Projects`).
 - Если нужна запись именно под страницей `PRDIGY-COO`, эту страницу нужно явно `Share` с integration.
 
+### Режим памяти (Variant A)
+- short-term память: Redis (быстро, TTL)
+- long-term память: Postgres
+- semantic память: Postgres + pgvector (если extension доступен)
+- если pgvector недоступен, бот продолжит работу с short-term памятью без semantic поиска
+
 Если голос распознаётся, но ответа нет:
 - проверь `OPENAI_API_KEY` и `OPENAI_MODEL`
 - проверь доступ к Notion (страница должна быть shared с integration)
@@ -100,6 +112,7 @@ git push -u origin main
 
 1. New Project → Deploy from GitHub repo.
 2. Добавь Variables из `.env`.
+3. Добавь в Railway сервисы: Postgres + Redis и прокинь их URL в `DATABASE_URL` и `REDIS_URL`.
 3. В проект добавлен `Dockerfile`, Railway будет собирать контейнер без `mise`/python-build-standalone.
 4. Start command внутри контейнера: `python -m app.main`.
 4. После деплоя открой Telegram и отправь `/setup`.

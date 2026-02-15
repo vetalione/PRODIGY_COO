@@ -2,3 +2,5 @@ python-telegram-bot==21.7
 openai==1.66.3
 notion-client==2.2.1
 python-dotenv==1.0.1
+asyncpg==0.30.0
+redis==5.2.1

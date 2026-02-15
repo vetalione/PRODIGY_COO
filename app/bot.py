@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, time
-from typing import Any
-from typing import Final
+from typing import Any, Final
 from zoneinfo import ZoneInfo
 
 from telegram import Update
@@ -11,6 +10,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 from app.agent import CoAgent
 from app.config import Settings
+from app.memory_store import MemoryStore
 from app.notion_service import NotionService
 
 LOGGER: Final = logging.getLogger(__name__)
@@ -30,9 +30,10 @@ class TelegramCooBot:
             projects_db_id=settings.notion_projects_db_id,
         )
         self.agent = CoAgent(api_key=settings.openai_api_key, model=settings.openai_model)
+        self.memory = MemoryStore(settings)
 
     def build_app(self) -> Application:
-        app = Application.builder().token(self.settings.telegram_bot_token).build()
+        app = Application.builder().token(self.settings.telegram_bot_token).post_init(self._on_startup).build()
 
         app.add_handler(CommandHandler("start", self.start))
         app.add_handler(CommandHandler("help", self.help))
@@ -51,8 +52,14 @@ class TelegramCooBot:
         app.add_handler(MessageHandler(filters.VOICE, self.handle_voice))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text))
         app.add_error_handler(self.on_error)
-
         return app
+
+    async def _on_startup(self, app: Application) -> None:
+        del app
+        try:
+            await self.memory.connect()
+        except Exception:
+            LOGGER.exception("Memory store init failed")
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._guard_user(update):
@@ -102,9 +109,7 @@ class TelegramCooBot:
         if not update.effective_user or not update.effective_chat:
             return
         context.user_data["bound_chat_id"] = update.effective_chat.id
-        await update.message.reply_text(
-            f"Чат привязан для проактивных сообщений. chat_id={update.effective_chat.id}"
-        )
+        await update.message.reply_text(f"Чат привязан для проактивных сообщений. chat_id={update.effective_chat.id}")
 
     async def remind(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._guard_user(update):
@@ -112,8 +117,352 @@ class TelegramCooBot:
         if not update.effective_user or not update.effective_chat:
             return
 
-        args = context.args
-        if len(args) < 2:
+        if len(context.args) < 2:
+            await update.message.reply_text("Использование: /remind HH:MM текст")
+            return
+
+        hhmm = context.args[0].strip()
+        reminder_text = " ".join(context.args[1:]).strip()
+        parsed_time = self._parse_hhmm(hhmm)
+        if not parsed_time:
+            await update.message.reply_text("Неверный формат времени. Нужен HH:MM")
+            return
+        if not reminder_text:
+            await update.message.reply_text("Добавь текст напоминания.")
+            return
+
+        chat_id = context.user_data.get("bound_chat_id", update.effective_chat.id)
+        reminder_id = f"r{int(datetime.now().timestamp())}"
+        payload = {"id": reminder_id, "text": reminder_text, "time": hhmm}
+        context.job_queue.run_daily(
+            self._send_reminder,
+            time=parsed_time,
+            chat_id=chat_id,
+            user_id=update.effective_user.id,
+            data=payload,
+            name=self._job_name(update.effective_user.id, reminder_id),
+        )
+
+        saved = context.user_data.get("reminders", [])
+        saved.append(payload)
+        context.user_data["reminders"] = saved
+        await update.message.reply_text(
+            f"Напоминание создано: id={reminder_id}, ежедневно в {hhmm} ({self.settings.bot_timezone})"
+        )
+
+    async def reminders(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard_user(update):
+            return
+        items = context.user_data.get("reminders", [])
+        if not items:
+            await update.message.reply_text("Активных напоминаний нет.")
+            return
+        text = "\n".join(f"- {r['id']}: {r['time']} | {r['text']}" for r in items[:20])
+        await update.message.reply_text("Твои напоминания:\n" + text)
+
+    async def unremind(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard_user(update):
+            return
+        if not update.effective_user:
+            return
+        if not context.args:
+            await update.message.reply_text("Использование: /unremind <id>")
+            return
+
+        reminder_id = context.args[0].strip()
+        jobs = context.job_queue.get_jobs_by_name(self._job_name(update.effective_user.id, reminder_id))
+        for job in jobs:
+            job.schedule_removal()
+
+        items = context.user_data.get("reminders", [])
+        context.user_data["reminders"] = [r for r in items if r.get("id") != reminder_id]
+        await update.message.reply_text(f"Напоминание удалено: {reminder_id}")
+
+    async def unlock(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard_user(update):
+            return
+        user_id = update.effective_user.id if update.effective_user else 0
+        if not self.settings.notion_access_phrase:
+            self.notion_unlocked_users.add(user_id)
+            await update.message.reply_text("Доступ к Notion открыт (фраза не задана в env).")
+            return
+
+        phrase = " ".join(context.args).strip()
+        if phrase and phrase == self.settings.notion_access_phrase:
+            self.notion_unlocked_users.add(user_id)
+            await update.message.reply_text("Доступ к Notion открыт.")
+            return
+        await update.message.reply_text("Неверная фраза.")
+
+    async def setup(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard_user(update):
+            return
+        if not await self._guard_notion_access(update):
+            return
+        ids = await self.notion.ensure_workspace()
+        await update.message.reply_text(
+            "Готово. Workspace в Notion подготовлен.\n"
+            f"WORKSPACE_PAGE_ID={ids.workspace_page_id}\n"
+            f"TASKS_DB_ID={ids.tasks_db_id}\n"
+            f"PROJECTS_DB_ID={ids.projects_db_id}\n"
+            f"MEMORY_DB_ID={ids.memory_db_id}"
+        )
+
+    async def focus(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard_user(update):
+            return
+        if not await self._guard_notion_access(update):
+            return
+        snapshot = await self.notion.get_focus_snapshot()
+        await update.message.reply_text(snapshot)
+
+    async def new_task(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard_user(update):
+            return
+        if not await self._guard_notion_access(update):
+            return
+        text = " ".join(context.args).strip()
+        if not text:
+            await update.message.reply_text("Использование: /newtask <текст задачи>")
+            return
+        task_id = await self.notion.add_task(text=text)
+        await update.message.reply_text(f"Задача добавлена в Notion. ID: {task_id}")
+
+    async def new_project(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard_user(update):
+            return
+        if not await self._guard_notion_access(update):
+            return
+        name = " ".join(context.args).strip()
+        if not name:
+            await update.message.reply_text("Использование: /newproject <название проекта>")
+            return
+        project_id = await self.notion.add_project(name=name)
+        await update.message.reply_text(f"Проект добавлен в Notion. ID: {project_id}")
+
+    async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard_user(update):
+            return
+        if update.effective_user:
+            LOGGER.info("Text from user_id=%s username=%s", update.effective_user.id, update.effective_user.username)
+
+        text = (update.message.text or "").strip()
+        if text.lower().startswith("задача:"):
+            if not await self._guard_notion_access(update):
+                return
+            task_text = text.split(":", 1)[1].strip()
+            if task_text:
+                task_id = await self.notion.add_task(task_text)
+                await update.message.reply_text(f"Сохранил задачу в Notion. ID: {task_id}")
+                return
+
+        await self._process_user_input(update, text)
+
+    async def handle_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard_user(update):
+            return
+        if not update.message or not update.message.voice:
+            return
+        if update.effective_user:
+            LOGGER.info("Voice from user_id=%s username=%s", update.effective_user.id, update.effective_user.username)
+
+        await update.message.reply_text("Принял голосовое. Распознаю...")
+        voice = update.message.voice
+        file = await context.bot.get_file(voice.file_id)
+        audio_bytes = bytes(await file.download_as_bytearray())
+        transcript = await self.agent.transcribe_voice(audio_bytes, filename="voice.ogg")
+        if not transcript:
+            await update.message.reply_text("Не удалось распознать голосовое. Попробуй ещё раз.")
+            return
+
+        await update.message.reply_text(f"Распознал: {transcript[:800]}")
+        await self._process_user_input(update, transcript)
+
+    async def approve(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard_user(update):
+            return
+        if not await self._guard_notion_access(update):
+            return
+
+        user_id = update.effective_user.id if update.effective_user else 0
+        pending = self.pending_actions.get(user_id)
+        if not pending:
+            await update.message.reply_text("Нет предложенных изменений для применения.")
+            return
+
+        action_logs: list[str] = []
+        for action in pending.get("actions", []):
+            if not isinstance(action, dict):
+                continue
+            try:
+                result = await self.notion.execute_action(action)
+                action_logs.append(result)
+            except Exception as exc:
+                LOGGER.exception("Failed Notion action on approve: %s", action)
+                action_logs.append(f"Ошибка изменения Notion: {exc}")
+
+        self.pending_actions.pop(user_id, None)
+        if action_logs:
+            await update.message.reply_text("Применил изменения в Notion:\n" + "\n".join(f"- {x}" for x in action_logs[:12]))
+        else:
+            await update.message.reply_text("Изменений не применено.")
+
+    async def reject(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard_user(update):
+            return
+        user_id = update.effective_user.id if update.effective_user else 0
+        had_plan = user_id in self.pending_actions
+        self.pending_actions.pop(user_id, None)
+        if had_plan:
+            await update.message.reply_text("Ок, изменения в Notion отклонены.")
+        else:
+            await update.message.reply_text("Нет активного плана для отклонения.")
+
+    async def _process_user_input(self, update: Update, user_text: str) -> None:
+        user_id = update.effective_user.id if update.effective_user else 0
+        notion_allowed = not self.settings.notion_access_phrase or (
+            update.effective_user and update.effective_user.id in self.notion_unlocked_users
+        )
+
+        try:
+            if notion_allowed:
+                focus_snapshot = await self.notion.get_focus_snapshot()
+                external_snapshot = await self.notion.get_external_sources_snapshot()
+                snapshot = (
+                    f"{focus_snapshot}\n\nВнешние источники Notion:\n{external_snapshot}"
+                    if external_snapshot
+                    else focus_snapshot
+                )
+            else:
+                snapshot = "Notion недоступен: пользователь не прошёл /unlock."
+        except Exception as exc:
+            LOGGER.exception("Notion snapshot failed")
+            snapshot = f"Не удалось прочитать Notion: {exc}"
+
+        try:
+            mem = await self.memory.get_context(user_id=user_id, query=user_text)
+            mem_block = self.memory.format_context(mem)
+            if mem_block:
+                snapshot += f"\n\n{mem_block}"
+        except Exception:
+            LOGGER.exception("Memory retrieval failed")
+
+        try:
+            plan = await self.agent.reply_with_plan(
+                user_text=user_text,
+                notion_snapshot=snapshot,
+                allow_notion_actions=notion_allowed,
+            )
+        except Exception as exc:
+            LOGGER.exception("Agent reply failed")
+            await update.message.reply_text(f"Ошибка ответа модели: {exc}")
+            return
+
+        answer = str(plan.get("reply", "")).strip() or "Не удалось сформировать ответ."
+        actions = [a for a in plan.get("actions", []) if isinstance(a, dict)]
+
+        try:
+            await self.memory.remember_turn(user_id=user_id, role="user", content=user_text)
+        except Exception:
+            LOGGER.exception("Failed to store user turn in memory")
+
+        if actions:
+            self.pending_actions[user_id] = {"actions": actions, "reply": answer}
+            actions_text = self._format_actions(actions)
+            msg = (
+                f"{answer}\n\n"
+                "План изменений в Notion (ожидает подтверждения):\n"
+                f"{actions_text}\n\n"
+                "Подтверди /approve или отмени /reject"
+            )
+            await update.message.reply_text(msg[:4000])
+            try:
+                await self.memory.remember_turn(user_id=user_id, role="assistant", content=answer)
+                await self.memory.remember_fact(user_id=user_id, fact_text=f"План действий: {actions_text[:1200]}")
+            except Exception:
+                LOGGER.exception("Failed to store assistant plan in memory")
+            return
+
+        await update.message.reply_text(answer[:4000])
+        try:
+            await self.memory.remember_turn(user_id=user_id, role="assistant", content=answer)
+            await self.memory.remember_fact(user_id=user_id, fact_text=f"Решение ассистента: {answer[:1200]}")
+        except Exception:
+            LOGGER.exception("Failed to store assistant turn in memory")
+
+    async def on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del update
+        LOGGER.exception("Unhandled error: %s", context.error)
+
+    def _parse_hhmm(self, hhmm: str) -> time | None:
+        try:
+            hour_s, min_s = hhmm.split(":", 1)
+            hour, minute = int(hour_s), int(min_s)
+            if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+                return None
+            return time(hour=hour, minute=minute, tzinfo=ZoneInfo(self.settings.bot_timezone))
+        except Exception:
+            return None
+
+    async def _send_reminder(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        data = context.job.data or {}
+        text = str(data.get("text", "Пора проверить фокус и задачи"))
+        await context.bot.send_message(chat_id=context.job.chat_id, text=f"Напоминание COO: {text}")
+
+    def _job_name(self, user_id: int, reminder_id: str) -> str:
+        return f"reminder:{user_id}:{reminder_id}"
+
+    def _format_actions(self, actions: list[dict[str, Any]]) -> str:
+        lines: list[str] = []
+        for idx, action in enumerate(actions, start=1):
+            action_type = str(action.get("type", "unknown"))
+            if action_type == "add_task":
+                lines.append(
+                    f"{idx}. add_task: {action.get('title', '')} | project={action.get('project', 'General')} | priority={action.get('priority', 'Medium')}"
+                )
+            elif action_type == "add_project":
+                lines.append(
+                    f"{idx}. add_project: {action.get('name', '')} | status={action.get('status', 'Experiment')}"
+                )
+            elif action_type == "update_task_status":
+                lines.append(
+                    f"{idx}. update_task_status: {action.get('title', '')} -> {action.get('status', 'Todo')}"
+                )
+            elif action_type == "update_project_status":
+                lines.append(
+                    f"{idx}. update_project_status: {action.get('name', '')} -> {action.get('status', 'Paused')}"
+                )
+            else:
+                lines.append(f"{idx}. unknown_action: {action}")
+        return "\n".join(lines)
+
+    async def _guard_user(self, update: Update) -> bool:
+        user_id = update.effective_user.id if update.effective_user else None
+        username = (update.effective_user.username or "").lower() if update.effective_user else ""
+
+        checks: list[bool] = []
+        if self.settings.telegram_allowed_user_id is not None:
+            checks.append(user_id == self.settings.telegram_allowed_user_id)
+        if self.settings.telegram_allowed_username is not None:
+            checks.append(username == self.settings.telegram_allowed_username)
+
+        if checks and not any(checks):
+            LOGGER.warning("Blocked user_id=%s username=%s", user_id, username)
+            if update.message:
+                await update.message.reply_text("Доступ запрещён.")
+            return False
+        return True
+
+    async def _guard_notion_access(self, update: Update) -> bool:
+        if not self.settings.notion_access_phrase:
+            return True
+        user_id = update.effective_user.id if update.effective_user else None
+        if user_id in self.notion_unlocked_users:
+            return True
+        if update.message:
+            await update.message.reply_text("Сначала /unlock <секретная фраза>.")
+        return False
+        """
             await update.message.reply_text("Использование: /remind HH:MM текст")
             return
 
@@ -131,7 +480,7 @@ class TelegramCooBot:
         reminder_id = f"r{int(datetime.now().timestamp())}"
         payload = {"id": reminder_id, "text": reminder_text, "time": hhmm}
 
-        context.job_queue.run_daily(
+                await self.memory.remember_turn(user_id=user_id, role="user", content=user_text)
             self._send_reminder,
             time=parsed_time,
             chat_id=chat_id,
@@ -146,12 +495,20 @@ class TelegramCooBot:
 
         await update.message.reply_text(
             f"Напоминание создано: id={reminder_id}, ежедневно в {hhmm} ({self.settings.bot_timezone})"
-        )
+                await self.memory.remember_turn(user_id=user_id, role="assistant", content=answer)
+                await self.memory.remember_fact(
+                    user_id=user_id,
+                    fact_text=f"План действий: {actions_text[:1200]}",
+                )
 
     async def reminders(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._guard_user(update):
             return
-        items = context.user_data.get("reminders", [])
+            await self.memory.remember_turn(user_id=user_id, role="assistant", content=answer)
+            await self.memory.remember_fact(
+                user_id=user_id,
+                fact_text=f"Решение ассистента: {answer[:1200]}",
+            )
         if not items:
             await update.message.reply_text("Активных напоминаний нет.")
             return
@@ -460,3 +817,4 @@ class TelegramCooBot:
         if update.message:
             await update.message.reply_text("Сначала /unlock <секретная фраза>.")
         return False
+        """
