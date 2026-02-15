@@ -373,6 +373,7 @@ class TelegramCooBot:
                 f"{answer}\n\n"
                 "План изменений в Notion (ожидает подтверждения):\n"
                 f"{actions_text}\n\n"
+                "⚠️ Изменения ещё НЕ применены.\n"
                 "Подтверди /approve или отмени /reject"
             )
             await update.message.reply_text(msg[:4000])

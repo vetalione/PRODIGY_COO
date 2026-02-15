@@ -66,6 +66,8 @@ class CoAgent:
             "3) {\"type\":\"update_task_status\",\"title\":string,\"status\":\"Todo\"|\"Doing\"|\"Done\"|\"Paused\"}\n"
             "4) {\"type\":\"update_project_status\",\"name\":string,\"status\":\"Main\"|\"Support\"|\"Experiment\"|\"Paused\"|\"Done\"}\n"
             "Если изменений в Notion не нужно, actions=[]. "
+            "Если пользователь просит план (например на 7 дней), сформируй список конкретных действий и заполни actions несколькими задачами add_task. "
+            "ВАЖНО: не пиши в reply, что изменения уже внесены в Notion. До фактического применения это только предложенный план. "
             f"Разрешение на изменения в Notion: {'yes' if allow_notion_actions else 'no'}; если no, actions=[]"
         )
 
