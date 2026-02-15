@@ -44,7 +44,7 @@ def load_settings() -> Settings:
         telegram_bot_token=telegram_bot_token,
         telegram_allowed_user_id=allowed_user,
         openai_api_key=openai_api_key,
-        openai_model=os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip(),
+        openai_model=os.getenv("OPENAI_MODEL", "gpt-5.3").strip(),
         notion_token=notion_token,
         notion_parent_page_id=notion_parent_page_id,
         notion_access_phrase=(os.getenv("NOTION_ACCESS_PHRASE", "").strip() or None),
