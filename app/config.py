@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 class Settings:
     telegram_bot_token: str
     telegram_allowed_user_id: int | None
+    telegram_allowed_username: str | None
     openai_api_key: str
     openai_model: str
     notion_token: str
@@ -39,10 +40,12 @@ def load_settings() -> Settings:
 
     allowed_user_raw = os.getenv("TELEGRAM_ALLOWED_USER_ID", "").strip()
     allowed_user = int(allowed_user_raw) if allowed_user_raw else None
+    allowed_username = os.getenv("TELEGRAM_ALLOWED_USERNAME", "").strip().lstrip("@").lower() or None
 
     return Settings(
         telegram_bot_token=telegram_bot_token,
         telegram_allowed_user_id=allowed_user,
+        telegram_allowed_username=allowed_username,
         openai_api_key=openai_api_key,
         openai_model=os.getenv("OPENAI_MODEL", "gpt-5.3").strip(),
         notion_token=notion_token,

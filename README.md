@@ -48,6 +48,7 @@ python -m app.main
 
 Рекомендуется:
 - `TELEGRAM_ALLOWED_USER_ID` (чтобы только ты имел доступ)
+- `TELEGRAM_ALLOWED_USERNAME` (альтернатива ID, например `vetalsmirnov`)
 - `NOTION_ACCESS_PHRASE` (секретная фраза; перед работой с Notion в Telegram используй `/unlock <фраза>`)
 
 ## 5) Команды в Telegram

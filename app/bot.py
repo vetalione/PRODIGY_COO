@@ -50,9 +50,11 @@ class TelegramCooBot:
         if not await self._guard_user(update):
             return
         user_id = update.effective_user.id if update.effective_user else 0
+        username = (update.effective_user.username or "") if update.effective_user else ""
         await update.message.reply_text(
             "COO агент активен.\n"
             f"Твой user_id: {user_id}\n"
+            f"Твой username: @{username}\n"
             "Команды: /myid, /setup, /focus, /newtask <текст>, /newproject <название>, /approve, /reject."
         )
 
@@ -76,7 +78,11 @@ class TelegramCooBot:
         if not await self._guard_user(update):
             return
         user_id = update.effective_user.id if update.effective_user else 0
-        await update.message.reply_text(f"Твой TELEGRAM_ALLOWED_USER_ID: {user_id}")
+        username = (update.effective_user.username or "") if update.effective_user else ""
+        await update.message.reply_text(
+            f"Твой TELEGRAM_ALLOWED_USER_ID: {user_id}\n"
+            f"Твой TELEGRAM_ALLOWED_USERNAME: @{username}"
+        )
 
     async def unlock(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._guard_user(update):
@@ -277,7 +283,15 @@ class TelegramCooBot:
 
     async def _guard_user(self, update: Update) -> bool:
         user_id = update.effective_user.id if update.effective_user else None
-        if self.settings.telegram_allowed_user_id and user_id != self.settings.telegram_allowed_user_id:
+        username = (update.effective_user.username or "").lower() if update.effective_user else ""
+
+        checks: list[bool] = []
+        if self.settings.telegram_allowed_user_id is not None:
+            checks.append(user_id == self.settings.telegram_allowed_user_id)
+        if self.settings.telegram_allowed_username is not None:
+            checks.append(username == self.settings.telegram_allowed_username)
+
+        if checks and not any(checks):
             LOGGER.warning("Blocked user_id=%s", user_id)
             if update.message:
                 await update.message.reply_text("Доступ запрещён.")
