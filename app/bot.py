@@ -204,7 +204,8 @@ class TelegramCooBot:
             "Готово. Workspace в Notion подготовлен.\n"
             f"WORKSPACE_PAGE_ID={ids.workspace_page_id}\n"
             f"TASKS_DB_ID={ids.tasks_db_id}\n"
-            f"PROJECTS_DB_ID={ids.projects_db_id}"
+            f"PROJECTS_DB_ID={ids.projects_db_id}\n"
+            f"MEMORY_DB_ID={ids.memory_db_id}"
         )
 
     async def focus(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -321,6 +322,7 @@ class TelegramCooBot:
             await update.message.reply_text("Нет активного плана для отклонения.")
 
     async def _process_user_input(self, update: Update, user_text: str) -> None:
+        user_id = update.effective_user.id if update.effective_user else 0
         notion_allowed = not self.settings.notion_access_phrase or (
             update.effective_user and update.effective_user.id in self.notion_unlocked_users
         )
@@ -333,6 +335,10 @@ class TelegramCooBot:
                     snapshot = f"{focus_snapshot}\n\nВнешние источники Notion:\n{external_snapshot}"
                 else:
                     snapshot = focus_snapshot
+
+                memory_context = await self.notion.get_memory_context(user_id=user_id, limit=12)
+                if memory_context:
+                    snapshot += f"\n\nИстория диалога (кратко):\n{memory_context}"
             else:
                 snapshot = "Notion недоступен: пользователь не прошёл /unlock."
         except Exception as exc:
@@ -352,7 +358,12 @@ class TelegramCooBot:
 
         answer = str(plan.get("reply", "")).strip() or "Не удалось сформировать ответ."
         actions = [a for a in plan.get("actions", []) if isinstance(a, dict)]
-        user_id = update.effective_user.id if update.effective_user else 0
+
+        if notion_allowed:
+            try:
+                await self.notion.add_memory_entry(user_id=user_id, role="user", text=user_text)
+            except Exception:
+                LOGGER.exception("Failed to store user memory entry")
 
         if actions:
             self.pending_actions[user_id] = {"actions": actions, "reply": answer}
@@ -364,9 +375,19 @@ class TelegramCooBot:
                 "Подтверди /approve или отмени /reject"
             )
             await update.message.reply_text(msg[:4000])
+            if notion_allowed:
+                try:
+                    await self.notion.add_memory_entry(user_id=user_id, role="assistant", text=answer)
+                except Exception:
+                    LOGGER.exception("Failed to store assistant memory entry")
             return
 
         await update.message.reply_text(answer[:4000])
+        if notion_allowed:
+            try:
+                await self.notion.add_memory_entry(user_id=user_id, role="assistant", text=answer)
+            except Exception:
+                LOGGER.exception("Failed to store assistant memory entry")
 
     async def on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         LOGGER.exception("Unhandled error: %s", context.error)

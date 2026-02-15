@@ -12,6 +12,7 @@ class NotionIds:
     workspace_page_id: str
     tasks_db_id: str
     projects_db_id: str
+    memory_db_id: str
 
 
 class NotionService:
@@ -23,13 +24,14 @@ class NotionService:
         workspace_page_id: str | None = None,
         tasks_db_id: str | None = None,
         projects_db_id: str | None = None,
+        memory_db_id: str | None = None,
     ) -> None:
         self.client = AsyncClient(auth=token)
         self.parent_page_id = parent_page_id
         self.source_db_ids = source_db_ids or []
         self.cached_ids: NotionIds | None = None
-        if workspace_page_id and tasks_db_id and projects_db_id:
-            self.cached_ids = NotionIds(workspace_page_id, tasks_db_id, projects_db_id)
+        if workspace_page_id and tasks_db_id and projects_db_id and memory_db_id:
+            self.cached_ids = NotionIds(workspace_page_id, tasks_db_id, projects_db_id, memory_db_id)
 
     async def ensure_workspace(self) -> NotionIds:
         if self.cached_ids:
@@ -104,12 +106,68 @@ class NotionService:
             )
             tasks_db_id = db["id"]
 
+        memory_db_id = await self._find_database_id_by_title("COO Memory")
+        if not memory_db_id:
+            db = await self.client.databases.create(
+                parent={"type": "page_id", "page_id": workspace_page_id},
+                title=[{"type": "text", "text": {"content": "COO Memory"}}],
+                properties={
+                    "Name": {"title": {}},
+                    "UserId": {"number": {}},
+                    "Role": {
+                        "select": {
+                            "options": [
+                                {"name": "user"},
+                                {"name": "assistant"},
+                                {"name": "system"},
+                            ]
+                        }
+                    },
+                    "Text": {"rich_text": {}},
+                    "At": {"date": {}},
+                },
+            )
+            memory_db_id = db["id"]
+
         self.cached_ids = NotionIds(
             workspace_page_id=workspace_page_id,
             tasks_db_id=tasks_db_id,
             projects_db_id=projects_db_id,
+            memory_db_id=memory_db_id,
         )
         return self.cached_ids
+
+    async def add_memory_entry(self, user_id: int, role: str, text: str) -> str:
+        ids = await self.ensure_workspace()
+        now_iso = _utc_now_iso()
+        page = await self.client.pages.create(
+            parent={"database_id": ids.memory_db_id},
+            properties={
+                "Name": {"title": [{"type": "text", "text": {"content": f"{role}:{text[:60]}"}}]},
+                "UserId": {"number": user_id},
+                "Role": {"select": {"name": role if role in {"user", "assistant", "system"} else "system"}},
+                "Text": {"rich_text": [{"type": "text", "text": {"content": text[:2000]}}]},
+                "At": {"date": {"start": now_iso}},
+            },
+        )
+        return page["id"]
+
+    async def get_memory_context(self, user_id: int, limit: int = 12) -> str:
+        ids = await self.ensure_workspace()
+        data = await self.client.databases.query(
+            database_id=ids.memory_db_id,
+            filter={"property": "UserId", "number": {"equals": user_id}},
+            sorts=[{"property": "At", "direction": "ascending"}],
+            page_size=max(1, min(limit, 50)),
+        )
+        lines: list[str] = []
+        for item in data.get("results", []):
+            props = item.get("properties", {})
+            role = ((props.get("Role", {}) or {}).get("select") or {}).get("name", "?")
+            text = _extract_rich_text(props.get("Text", {}))
+            if text:
+                lines.append(f"{role}: {text[:500]}")
+        return "\n".join(lines[-limit:])
 
     async def add_task(self, text: str, project: str = "", priority: str = "Medium") -> str:
         ids = await self.ensure_workspace()
@@ -347,6 +405,17 @@ class NotionService:
 def _extract_title(prop: dict[str, Any]) -> str:
     parts = prop.get("title", []) if isinstance(prop, dict) else []
     return "".join(p.get("plain_text", "") for p in parts) or "Без названия"
+
+
+def _extract_rich_text(prop: dict[str, Any]) -> str:
+    parts = prop.get("rich_text", []) if isinstance(prop, dict) else []
+    return "".join(p.get("plain_text", "") for p in parts).strip()
+
+
+def _utc_now_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
 def _extract_best_row_summary(properties: dict[str, Any]) -> str:
