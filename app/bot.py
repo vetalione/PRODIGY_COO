@@ -36,6 +36,7 @@ class TelegramCooBot:
         app.add_handler(CommandHandler("focus", self.focus))
         app.add_handler(CommandHandler("newtask", self.new_task))
         app.add_handler(CommandHandler("newproject", self.new_project))
+        app.add_handler(MessageHandler(filters.VOICE, self.handle_voice))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text))
 
         return app
@@ -57,7 +58,7 @@ class TelegramCooBot:
             "2) /newtask Текст — добавить задачу\n"
             "3) /newproject Название — добавить проект\n"
             "4) /focus — текущий срез по задачам и проектам\n"
-            "5) Просто напиши сообщение — дам структурное COO-решение"
+            "5) Голосовое/текст — дам COO-ответ и при необходимости внесу изменения в Notion"
         )
 
     async def unlock(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -137,11 +138,56 @@ class TelegramCooBot:
                 await update.message.reply_text(f"Сохранил задачу в Notion. ID: {task_id}")
                 return
 
-        if self.settings.notion_access_phrase and (update.effective_user.id not in self.notion_unlocked_users):
-            snapshot = "Notion недоступен: пользователь не прошёл /unlock."
-        else:
+        await self._process_user_input(update, text)
+
+    async def handle_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard_user(update):
+            return
+        if not update.message or not update.message.voice:
+            return
+
+        await update.message.reply_text("Принял голосовое. Распознаю...")
+        voice = update.message.voice
+        file = await context.bot.get_file(voice.file_id)
+        audio_bytes = bytes(await file.download_as_bytearray())
+        transcript = await self.agent.transcribe_voice(audio_bytes, filename="voice.ogg")
+        if not transcript:
+            await update.message.reply_text("Не удалось распознать голосовое. Попробуй ещё раз.")
+            return
+
+        await update.message.reply_text(f"Распознал: {transcript[:800]}")
+        await self._process_user_input(update, transcript)
+
+    async def _process_user_input(self, update: Update, user_text: str) -> None:
+        notion_allowed = not self.settings.notion_access_phrase or (
+            update.effective_user and update.effective_user.id in self.notion_unlocked_users
+        )
+
+        if notion_allowed:
             snapshot = await self.notion.get_focus_snapshot()
-        answer = await self.agent.reply(user_text=text, notion_snapshot=snapshot)
+        else:
+            snapshot = "Notion недоступен: пользователь не прошёл /unlock."
+
+        plan = await self.agent.reply_with_plan(
+            user_text=user_text,
+            notion_snapshot=snapshot,
+            allow_notion_actions=notion_allowed,
+        )
+
+        action_logs: list[str] = []
+        for action in plan.get("actions", []):
+            if not isinstance(action, dict):
+                continue
+            try:
+                result = await self.notion.execute_action(action)
+                action_logs.append(result)
+            except Exception as exc:
+                LOGGER.exception("Failed Notion action: %s", action)
+                action_logs.append(f"Ошибка изменения Notion: {exc}")
+
+        answer = str(plan.get("reply", "")).strip() or "Не удалось сформировать ответ."
+        if action_logs:
+            answer += "\n\nИзменения в Notion:\n" + "\n".join(f"- {x}" for x in action_logs[:8])
         await update.message.reply_text(answer[:4000])
 
     async def _guard_user(self, update: Update) -> bool:

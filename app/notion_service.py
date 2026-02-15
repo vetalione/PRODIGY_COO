@@ -186,6 +186,64 @@ class NotionService:
             f"Задачи:\n{tasks_text}"
         )
 
+    async def execute_action(self, action: dict[str, Any]) -> str:
+        action_type = str(action.get("type", "")).strip()
+        if action_type == "add_task":
+            task_id = await self.add_task(
+                text=str(action.get("title", "")).strip() or "Новая задача",
+                project=str(action.get("project", "")).strip(),
+                priority=_safe_task_priority(str(action.get("priority", "Medium"))),
+            )
+            return f"Создана задача: {task_id}"
+
+        if action_type == "add_project":
+            project_id = await self.add_project(
+                name=str(action.get("name", "")).strip() or "Новый проект",
+                status=_safe_project_status(str(action.get("status", "Experiment"))),
+                kpi=str(action.get("kpi", "")).strip(),
+            )
+            return f"Создан проект: {project_id}"
+
+        if action_type == "update_task_status":
+            title = str(action.get("title", "")).strip()
+            status = _safe_task_status(str(action.get("status", "Todo")))
+            ok = await self.update_task_status_by_name(title=title, status=status)
+            return f"Статус задачи обновлён: {title} -> {status}" if ok else f"Задача не найдена: {title}"
+
+        if action_type == "update_project_status":
+            name = str(action.get("name", "")).strip()
+            status = _safe_project_status(str(action.get("status", "Paused")))
+            ok = await self.update_project_status_by_name(name=name, status=status)
+            return f"Статус проекта обновлён: {name} -> {status}" if ok else f"Проект не найден: {name}"
+
+        return "Пропущено: неизвестное действие"
+
+    async def update_task_status_by_name(self, title: str, status: str) -> bool:
+        if not title:
+            return False
+        ids = await self.ensure_workspace()
+        row = await self._find_task_row_by_name(ids.tasks_db_id, title)
+        if not row:
+            return False
+        await self.client.pages.update(
+            page_id=row["id"],
+            properties={"Status": {"select": {"name": status}}},
+        )
+        return True
+
+    async def update_project_status_by_name(self, name: str, status: str) -> bool:
+        if not name:
+            return False
+        ids = await self.ensure_workspace()
+        row = await self._find_project_row_by_name(ids.projects_db_id, name)
+        if not row:
+            return False
+        await self.client.pages.update(
+            page_id=row["id"],
+            properties={"Status": {"select": {"name": status}}},
+        )
+        return True
+
     async def _find_page_id_by_title(self, title: str) -> str | None:
         result = await self.client.search(
             query=title,
@@ -209,7 +267,52 @@ class NotionService:
                 return item.get("id")
         return None
 
+    async def _find_task_row_by_name(self, db_id: str, name: str) -> dict[str, Any] | None:
+        result = await self.client.databases.query(database_id=db_id, page_size=50)
+        target = name.lower().strip()
+        for item in result.get("results", []):
+            props = item.get("properties", {})
+            current = _extract_title(props.get("Name", {})).lower().strip()
+            if current == target:
+                return item
+        for item in result.get("results", []):
+            props = item.get("properties", {})
+            current = _extract_title(props.get("Name", {})).lower().strip()
+            if target and target in current:
+                return item
+        return None
+
+    async def _find_project_row_by_name(self, db_id: str, name: str) -> dict[str, Any] | None:
+        result = await self.client.databases.query(database_id=db_id, page_size=50)
+        target = name.lower().strip()
+        for item in result.get("results", []):
+            props = item.get("properties", {})
+            current = _extract_title(props.get("Name", {})).lower().strip()
+            if current == target:
+                return item
+        for item in result.get("results", []):
+            props = item.get("properties", {})
+            current = _extract_title(props.get("Name", {})).lower().strip()
+            if target and target in current:
+                return item
+        return None
+
 
 def _extract_title(prop: dict[str, Any]) -> str:
     parts = prop.get("title", []) if isinstance(prop, dict) else []
     return "".join(p.get("plain_text", "") for p in parts) or "Без названия"
+
+
+def _safe_task_priority(value: str) -> str:
+    allowed = {"High", "Medium", "Low"}
+    return value if value in allowed else "Medium"
+
+
+def _safe_task_status(value: str) -> str:
+    allowed = {"Todo", "Doing", "Done", "Paused"}
+    return value if value in allowed else "Todo"
+
+
+def _safe_project_status(value: str) -> str:
+    allowed = {"Main", "Support", "Experiment", "Paused", "Done"}
+    return value if value in allowed else "Experiment"
