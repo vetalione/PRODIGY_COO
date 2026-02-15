@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from notion_client import AsyncClient
+from notion_client.errors import APIResponseError
 
 
 @dataclass
@@ -17,7 +18,7 @@ class NotionService:
     def __init__(
         self,
         token: str,
-        parent_page_id: str,
+        parent_page_id: str | None,
         workspace_page_id: str | None = None,
         tasks_db_id: str | None = None,
         projects_db_id: str | None = None,
@@ -34,19 +35,7 @@ class NotionService:
 
         workspace_page_id = await self._find_page_id_by_title("COO Workspace")
         if not workspace_page_id:
-            page = await self.client.pages.create(
-                parent={"type": "page_id", "page_id": self.parent_page_id},
-                properties={
-                    "title": {
-                        "title": [
-                            {
-                                "type": "text",
-                                "text": {"content": "COO Workspace"},
-                            }
-                        ]
-                    }
-                },
-            )
+            page = await self._create_workspace_page()
             workspace_page_id = page["id"]
 
         projects_db_id = await self._find_database_id_by_title("COO Projects")
@@ -254,6 +243,35 @@ class NotionService:
             if _extract_title(item.get("properties", {}).get("title", {})) == title:
                 return item.get("id")
         return None
+
+    async def _create_workspace_page(self) -> dict[str, Any]:
+        payload = {
+            "properties": {
+                "title": {
+                    "title": [
+                        {
+                            "type": "text",
+                            "text": {"content": "COO Workspace"},
+                        }
+                    ]
+                }
+            }
+        }
+
+        if self.parent_page_id:
+            try:
+                return await self.client.pages.create(
+                    parent={"type": "page_id", "page_id": self.parent_page_id},
+                    **payload,
+                )
+            except APIResponseError as exc:
+                if exc.code not in {"object_not_found", "validation_error"}:
+                    raise
+
+        return await self.client.pages.create(
+            parent={"workspace": True},
+            **payload,
+        )
 
     async def _find_database_id_by_title(self, title: str) -> str | None:
         result = await self.client.search(

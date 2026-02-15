@@ -45,7 +45,9 @@ python -m app.main
 - `TELEGRAM_BOT_TOKEN`
 - `OPENAI_API_KEY`
 - `NOTION_TOKEN`
-- `NOTION_PARENT_PAGE_ID`
+
+Опционально:
+- `NOTION_PARENT_PAGE_ID` (если пусто или недоступен, бот создаст `COO Workspace` в корне workspace)
 
 Рекомендуется:
 - `TELEGRAM_ALLOWED_USER_ID` (чтобы только ты имел доступ)

@@ -15,7 +15,7 @@ class Settings:
     openai_api_key: str
     openai_model: str
     notion_token: str
-    notion_parent_page_id: str
+    notion_parent_page_id: str | None
     notion_access_phrase: str | None
     notion_workspace_page_id: str | None
     notion_tasks_db_id: str | None
@@ -28,7 +28,7 @@ def load_settings() -> Settings:
     telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
     notion_token = os.getenv("NOTION_TOKEN", "").strip()
-    notion_parent_page_id = os.getenv("NOTION_PARENT_PAGE_ID", "").replace("-", "").strip()
+    notion_parent_page_id = os.getenv("NOTION_PARENT_PAGE_ID", "").replace("-", "").strip() or None
 
     if not telegram_bot_token:
         raise ValueError("TELEGRAM_BOT_TOKEN is required")
@@ -36,8 +36,6 @@ def load_settings() -> Settings:
         raise ValueError("OPENAI_API_KEY is required")
     if not notion_token:
         raise ValueError("NOTION_TOKEN is required")
-    if not notion_parent_page_id:
-        raise ValueError("NOTION_PARENT_PAGE_ID is required")
 
     allowed_user_raw = os.getenv("TELEGRAM_ALLOWED_USER_ID", "").strip()
     allowed_user = int(allowed_user_raw) if allowed_user_raw else None
