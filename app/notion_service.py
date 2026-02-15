@@ -19,12 +19,14 @@ class NotionService:
         self,
         token: str,
         parent_page_id: str | None,
+        source_db_ids: list[str] | None = None,
         workspace_page_id: str | None = None,
         tasks_db_id: str | None = None,
         projects_db_id: str | None = None,
     ) -> None:
         self.client = AsyncClient(auth=token)
         self.parent_page_id = parent_page_id
+        self.source_db_ids = source_db_ids or []
         self.cached_ids: NotionIds | None = None
         if workspace_page_id and tasks_db_id and projects_db_id:
             self.cached_ids = NotionIds(workspace_page_id, tasks_db_id, projects_db_id)
@@ -175,6 +177,32 @@ class NotionService:
             f"Задачи:\n{tasks_text}"
         )
 
+    async def get_external_sources_snapshot(self, limit_per_db: int = 8) -> str:
+        if not self.source_db_ids:
+            return ""
+
+        sections: list[str] = []
+        for db_id in self.source_db_ids:
+            try:
+                db = await self.client.databases.retrieve(database_id=db_id)
+                db_title = "".join(t.get("plain_text", "") for t in db.get("title", [])) or f"DB {db_id[:8]}"
+                query = await self.client.databases.query(database_id=db_id, page_size=limit_per_db)
+
+                rows: list[str] = []
+                for item in query.get("results", []):
+                    props = item.get("properties", {})
+                    rows.append(f"- {_extract_best_row_summary(props)}")
+
+                block = f"Источник: {db_title} ({db_id})\n"
+                block += "\n".join(rows) if rows else "- нет записей"
+                sections.append(block)
+            except Exception as exc:
+                sections.append(f"Источник: {db_id}\n- ошибка чтения: {exc}")
+
+        if not sections:
+            return ""
+        return "\n\n".join(sections)
+
     async def execute_action(self, action: dict[str, Any]) -> str:
         action_type = str(action.get("type", "")).strip()
         if action_type == "add_task":
@@ -319,6 +347,34 @@ class NotionService:
 def _extract_title(prop: dict[str, Any]) -> str:
     parts = prop.get("title", []) if isinstance(prop, dict) else []
     return "".join(p.get("plain_text", "") for p in parts) or "Без названия"
+
+
+def _extract_best_row_summary(properties: dict[str, Any]) -> str:
+    title_value = ""
+    status_value = ""
+
+    for prop_name, prop in properties.items():
+        ptype = prop.get("type") if isinstance(prop, dict) else None
+        if not title_value and ptype == "title":
+            title_value = _extract_title(prop)
+        elif not status_value and ptype == "status":
+            status_value = ((prop.get("status") or {}).get("name") or "").strip()
+        elif not status_value and ptype == "select":
+            status_value = ((prop.get("select") or {}).get("name") or "").strip()
+        elif not title_value and ptype == "rich_text":
+            text = "".join(x.get("plain_text", "") for x in prop.get("rich_text", []))
+            if text:
+                title_value = text[:120]
+        elif not title_value and ptype == "url":
+            val = str(prop.get("url") or "").strip()
+            if val:
+                title_value = val[:120]
+        elif not title_value and ptype == "number":
+            if prop.get("number") is not None:
+                title_value = f"{prop_name}: {prop.get('number')}"
+
+    title_value = title_value or "Без названия"
+    return f"{title_value} [{status_value}]" if status_value else title_value
 
 
 def _safe_task_priority(value: str) -> str:

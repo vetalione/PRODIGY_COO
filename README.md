@@ -48,6 +48,7 @@ python -m app.main
 
 Опционально:
 - `NOTION_PARENT_PAGE_ID` (если пусто или недоступен, бот создаст `COO Workspace` в корне workspace)
+- `NOTION_SOURCE_DB_IDS` (через запятую: список database IDs для чтения контекста)
 
 Рекомендуется:
 - `TELEGRAM_ALLOWED_USER_ID` (чтобы только ты имел доступ)
@@ -73,6 +74,11 @@ python -m app.main
 - `/unremind <id>`
 
 Также можно просто отправить голосовое с вопросом по текущим задачам/проектам — агент распознает его и ответит текстом, при необходимости обновив Notion.
+
+### Режим Notion сейчас
+- Чтение: из внутренних баз агента + из `NOTION_SOURCE_DB_IDS` (read-only контекст).
+- Запись/планирование: в рабочее пространство агента (`COO Workspace`, `COO Tasks`, `COO Projects`).
+- Если нужна запись именно под страницей `PRDIGY-COO`, эту страницу нужно явно `Share` с integration.
 
 Если голос распознаётся, но ответа нет:
 - проверь `OPENAI_API_KEY` и `OPENAI_MODEL`

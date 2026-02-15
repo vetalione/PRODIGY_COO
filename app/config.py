@@ -16,6 +16,7 @@ class Settings:
     openai_model: str
     notion_token: str
     notion_parent_page_id: str | None
+        notion_source_db_ids: list[str]
     notion_access_phrase: str | None
     notion_workspace_page_id: str | None
     notion_tasks_db_id: str | None
@@ -40,6 +41,8 @@ def load_settings() -> Settings:
     allowed_user_raw = os.getenv("TELEGRAM_ALLOWED_USER_ID", "").strip()
     allowed_user = int(allowed_user_raw) if allowed_user_raw else None
     allowed_username = os.getenv("TELEGRAM_ALLOWED_USERNAME", "").strip().lstrip("@").lower() or None
+        source_db_ids_raw = os.getenv("NOTION_SOURCE_DB_IDS", "").strip()
+        source_db_ids = [x.replace("-", "").strip() for x in source_db_ids_raw.split(",") if x.strip()]
 
     return Settings(
         telegram_bot_token=telegram_bot_token,
@@ -50,6 +53,7 @@ def load_settings() -> Settings:
         openai_model=os.getenv("OPENAI_MODEL", "gpt-5.3").strip(),
         notion_token=notion_token,
         notion_parent_page_id=notion_parent_page_id,
+            notion_source_db_ids=source_db_ids,
         notion_access_phrase=(os.getenv("NOTION_ACCESS_PHRASE", "").strip() or None),
         notion_workspace_page_id=(os.getenv("NOTION_WORKSPACE_PAGE_ID", "").replace("-", "").strip() or None),
         notion_tasks_db_id=(os.getenv("NOTION_TASKS_DB_ID", "").replace("-", "").strip() or None),

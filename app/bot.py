@@ -24,6 +24,7 @@ class TelegramCooBot:
         self.notion = NotionService(
             token=settings.notion_token,
             parent_page_id=settings.notion_parent_page_id,
+            source_db_ids=settings.notion_source_db_ids,
             workspace_page_id=settings.notion_workspace_page_id,
             tasks_db_id=settings.notion_tasks_db_id,
             projects_db_id=settings.notion_projects_db_id,
@@ -326,7 +327,12 @@ class TelegramCooBot:
 
         try:
             if notion_allowed:
-                snapshot = await self.notion.get_focus_snapshot()
+                focus_snapshot = await self.notion.get_focus_snapshot()
+                external_snapshot = await self.notion.get_external_sources_snapshot()
+                if external_snapshot:
+                    snapshot = f"{focus_snapshot}\n\nВнешние источники Notion:\n{external_snapshot}"
+                else:
+                    snapshot = focus_snapshot
             else:
                 snapshot = "Notion недоступен: пользователь не прошёл /unlock."
         except Exception as exc:
