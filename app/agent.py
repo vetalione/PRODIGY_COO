@@ -1,23 +1,69 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, BadRequestError
 
 from app.prompts import SYSTEM_PROMPT
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _normalize_model_name(model: str) -> str:
+    value = (model or "").strip()
+    if value in {"gpt-5.3", "gpt-5.3-codex"}:
+        return "gpt-5"
+    return value or "gpt-5"
 
 
 class CoAgent:
     def __init__(self, api_key: str, model: str) -> None:
         self.client = AsyncOpenAI(api_key=api_key)
-        self.model = model
+        self.model = _normalize_model_name(model)
+
+    async def _responses_create_with_retries(
+        self,
+        *,
+        input_messages: list[dict[str, str]],
+        temperature: float,
+    ):
+        candidate_models: list[str] = []
+        for m in [self.model, "gpt-5", "gpt-4.1-mini"]:
+            normalized = _normalize_model_name(m)
+            if normalized not in candidate_models:
+                candidate_models.append(normalized)
+
+        for model in candidate_models:
+            params: dict[str, Any] = {
+                "model": model,
+                "input": input_messages,
+            }
+            # Для GPT-5 семейства temperature может быть недоступен/ограничен.
+            if not model.startswith("gpt-5"):
+                params["temperature"] = temperature
+
+            try:
+                return await self.client.responses.create(**params)
+            except BadRequestError as exc:
+                LOGGER.warning(
+                    "OpenAI bad request for model=%s: %s",
+                    model,
+                    getattr(exc, "message", str(exc)),
+                )
+                continue
+            except Exception:
+                LOGGER.exception("OpenAI responses.create failed for model=%s", model)
+                continue
+
+        raise RuntimeError("No compatible OpenAI model available for responses.create")
 
     async def reply(self, user_text: str, notion_snapshot: str) -> str:
         try:
-            response = await self.client.responses.create(
-                model=self.model,
-                input=[
+            response = await self._responses_create_with_retries(
+                input_messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {
                         "role": "system",
@@ -29,19 +75,8 @@ class CoAgent:
             )
             return (response.output_text or "Не удалось сформировать ответ.").strip()
         except Exception:
-            fallback = await self.client.responses.create(
-                model="gpt-4.1-mini",
-                input=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {
-                        "role": "system",
-                        "content": f"Контекст из Notion:\n{notion_snapshot}",
-                    },
-                    {"role": "user", "content": user_text},
-                ],
-                temperature=0.4,
-            )
-            return (fallback.output_text or "Не удалось сформировать ответ.").strip()
+            LOGGER.exception("Primary reply generation failed")
+            return "Не удалось сформировать ответ."
 
     async def transcribe_voice(self, audio_bytes: bytes, filename: str = "voice.ogg") -> str:
         transcript = await self.client.audio.transcriptions.create(
@@ -72,9 +107,8 @@ class CoAgent:
         )
 
         try:
-            response = await self.client.responses.create(
-                model=self.model,
-                input=[
+            response = await self._responses_create_with_retries(
+                input_messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "system", "content": planning_prompt},
                     {"role": "system", "content": f"Контекст из Notion:\n{notion_snapshot}"},
@@ -84,6 +118,7 @@ class CoAgent:
             )
             raw = (response.output_text or "").strip()
         except Exception:
+            LOGGER.exception("Planning response generation failed")
             return {"reply": await self.reply(user_text, notion_snapshot), "actions": []}
         parsed = _safe_json(raw)
         if not isinstance(parsed, dict):

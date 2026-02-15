@@ -59,7 +59,7 @@ def load_settings() -> Settings:
         telegram_allowed_username=allowed_username,
         bot_timezone=os.getenv("BOT_TIMEZONE", "Europe/Moscow").strip(),
         openai_api_key=openai_api_key,
-        openai_model=os.getenv("OPENAI_MODEL", "gpt-5.3").strip(),
+        openai_model=os.getenv("OPENAI_MODEL", "gpt-5").strip(),
         memory_embed_model=os.getenv("MEMORY_EMBED_MODEL", "text-embedding-3-small").strip(),
         database_url=(os.getenv("DATABASE_URL", "").strip() or None),
         redis_url=(os.getenv("REDIS_URL", "").strip() or None),
