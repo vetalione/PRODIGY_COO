@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, time
 from typing import Any
 from typing import Final
+from zoneinfo import ZoneInfo
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
@@ -41,8 +43,13 @@ class TelegramCooBot:
         app.add_handler(CommandHandler("newproject", self.new_project))
         app.add_handler(CommandHandler("approve", self.approve))
         app.add_handler(CommandHandler("reject", self.reject))
+        app.add_handler(CommandHandler("bind", self.bind_chat))
+        app.add_handler(CommandHandler("remind", self.remind))
+        app.add_handler(CommandHandler("reminders", self.reminders))
+        app.add_handler(CommandHandler("unremind", self.unremind))
         app.add_handler(MessageHandler(filters.VOICE, self.handle_voice))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text))
+        app.add_error_handler(self.on_error)
 
         return app
 
@@ -55,7 +62,7 @@ class TelegramCooBot:
             "COO агент активен.\n"
             f"Твой user_id: {user_id}\n"
             f"Твой username: @{username}\n"
-            "Команды: /myid, /setup, /focus, /newtask <текст>, /newproject <название>, /approve, /reject."
+            "Команды: /myid, /setup, /focus, /newtask <текст>, /newproject <название>, /approve, /reject, /bind, /remind, /reminders, /unremind."
         )
 
     async def help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -71,7 +78,11 @@ class TelegramCooBot:
             "4) /focus — текущий срез по задачам и проектам\n"
             "5) Голосовое/текст — дам COO-ответ и предложу изменения в Notion\n"
             "6) /approve — применить предложенные изменения\n"
-            "7) /reject — отклонить предложенные изменения"
+            "7) /reject — отклонить предложенные изменения\n"
+            "8) /bind — привязать чат для проактивных напоминаний\n"
+            "9) /remind HH:MM текст — ежедневное напоминание\n"
+            "10) /reminders — список напоминаний\n"
+            "11) /unremind <id> — удалить напоминание"
         )
 
     async def my_id(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -83,6 +94,87 @@ class TelegramCooBot:
             f"Твой TELEGRAM_ALLOWED_USER_ID: {user_id}\n"
             f"Твой TELEGRAM_ALLOWED_USERNAME: @{username}"
         )
+
+    async def bind_chat(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard_user(update):
+            return
+        if not update.effective_user or not update.effective_chat:
+            return
+        context.user_data["bound_chat_id"] = update.effective_chat.id
+        await update.message.reply_text(
+            f"Чат привязан для проактивных сообщений. chat_id={update.effective_chat.id}"
+        )
+
+    async def remind(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard_user(update):
+            return
+        if not update.effective_user or not update.effective_chat:
+            return
+
+        args = context.args
+        if len(args) < 2:
+            await update.message.reply_text("Использование: /remind HH:MM текст")
+            return
+
+        hhmm = args[0].strip()
+        reminder_text = " ".join(args[1:]).strip()
+        parsed_time = self._parse_hhmm(hhmm)
+        if not parsed_time:
+            await update.message.reply_text("Неверный формат времени. Нужен HH:MM")
+            return
+        if not reminder_text:
+            await update.message.reply_text("Добавь текст напоминания.")
+            return
+
+        chat_id = context.user_data.get("bound_chat_id", update.effective_chat.id)
+        reminder_id = f"r{int(datetime.now().timestamp())}"
+        payload = {"id": reminder_id, "text": reminder_text, "time": hhmm}
+
+        context.job_queue.run_daily(
+            self._send_reminder,
+            time=parsed_time,
+            chat_id=chat_id,
+            user_id=update.effective_user.id,
+            data=payload,
+            name=self._job_name(update.effective_user.id, reminder_id),
+        )
+
+        saved = context.user_data.get("reminders", [])
+        saved.append(payload)
+        context.user_data["reminders"] = saved
+
+        await update.message.reply_text(
+            f"Напоминание создано: id={reminder_id}, ежедневно в {hhmm} ({self.settings.bot_timezone})"
+        )
+
+    async def reminders(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard_user(update):
+            return
+        items = context.user_data.get("reminders", [])
+        if not items:
+            await update.message.reply_text("Активных напоминаний нет.")
+            return
+        text = "\n".join(f"- {r['id']}: {r['time']} | {r['text']}" for r in items[:20])
+        await update.message.reply_text("Твои напоминания:\n" + text)
+
+    async def unremind(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard_user(update):
+            return
+        if not update.effective_user:
+            return
+        if not context.args:
+            await update.message.reply_text("Использование: /unremind <id>")
+            return
+
+        reminder_id = context.args[0].strip()
+        job_name = self._job_name(update.effective_user.id, reminder_id)
+        jobs = context.job_queue.get_jobs_by_name(job_name)
+        for job in jobs:
+            job.schedule_removal()
+
+        items = context.user_data.get("reminders", [])
+        context.user_data["reminders"] = [r for r in items if r.get("id") != reminder_id]
+        await update.message.reply_text(f"Напоминание удалено: {reminder_id}")
 
     async def unlock(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._guard_user(update):
@@ -149,6 +241,8 @@ class TelegramCooBot:
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._guard_user(update):
             return
+        if update.effective_user:
+            LOGGER.info("Text from user_id=%s username=%s", update.effective_user.id, update.effective_user.username)
 
         text = (update.message.text or "").strip()
 
@@ -168,6 +262,8 @@ class TelegramCooBot:
             return
         if not update.message or not update.message.voice:
             return
+        if update.effective_user:
+            LOGGER.info("Voice from user_id=%s username=%s", update.effective_user.id, update.effective_user.username)
 
         await update.message.reply_text("Принял голосовое. Распознаю...")
         voice = update.message.voice
@@ -228,16 +324,25 @@ class TelegramCooBot:
             update.effective_user and update.effective_user.id in self.notion_unlocked_users
         )
 
-        if notion_allowed:
-            snapshot = await self.notion.get_focus_snapshot()
-        else:
-            snapshot = "Notion недоступен: пользователь не прошёл /unlock."
+        try:
+            if notion_allowed:
+                snapshot = await self.notion.get_focus_snapshot()
+            else:
+                snapshot = "Notion недоступен: пользователь не прошёл /unlock."
+        except Exception as exc:
+            LOGGER.exception("Notion snapshot failed")
+            snapshot = f"Не удалось прочитать Notion: {exc}"
 
-        plan = await self.agent.reply_with_plan(
-            user_text=user_text,
-            notion_snapshot=snapshot,
-            allow_notion_actions=notion_allowed,
-        )
+        try:
+            plan = await self.agent.reply_with_plan(
+                user_text=user_text,
+                notion_snapshot=snapshot,
+                allow_notion_actions=notion_allowed,
+            )
+        except Exception as exc:
+            LOGGER.exception("Agent reply failed")
+            await update.message.reply_text(f"Ошибка ответа модели: {exc}")
+            return
 
         answer = str(plan.get("reply", "")).strip() or "Не удалось сформировать ответ."
         actions = [a for a in plan.get("actions", []) if isinstance(a, dict)]
@@ -256,6 +361,27 @@ class TelegramCooBot:
             return
 
         await update.message.reply_text(answer[:4000])
+
+    async def on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        LOGGER.exception("Unhandled error: %s", context.error)
+
+    def _parse_hhmm(self, hhmm: str) -> time | None:
+        try:
+            hour_s, min_s = hhmm.split(":", 1)
+            hour, minute = int(hour_s), int(min_s)
+            if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+                return None
+            return time(hour=hour, minute=minute, tzinfo=ZoneInfo(self.settings.bot_timezone))
+        except Exception:
+            return None
+
+    async def _send_reminder(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        data = context.job.data or {}
+        text = str(data.get("text", "Пора проверить фокус и задачи"))
+        await context.bot.send_message(chat_id=context.job.chat_id, text=f"Напоминание COO: {text}")
+
+    def _job_name(self, user_id: int, reminder_id: str) -> str:
+        return f"reminder:{user_id}:{reminder_id}"
 
     def _format_actions(self, actions: list[dict[str, Any]]) -> str:
         lines: list[str] = []

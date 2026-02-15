@@ -14,19 +14,34 @@ class CoAgent:
         self.model = model
 
     async def reply(self, user_text: str, notion_snapshot: str) -> str:
-        response = await self.client.responses.create(
-            model=self.model,
-            input=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {
-                    "role": "system",
-                    "content": f"Контекст из Notion:\n{notion_snapshot}",
-                },
-                {"role": "user", "content": user_text},
-            ],
-            temperature=0.4,
-        )
-        return (response.output_text or "Не удалось сформировать ответ.").strip()
+        try:
+            response = await self.client.responses.create(
+                model=self.model,
+                input=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {
+                        "role": "system",
+                        "content": f"Контекст из Notion:\n{notion_snapshot}",
+                    },
+                    {"role": "user", "content": user_text},
+                ],
+                temperature=0.4,
+            )
+            return (response.output_text or "Не удалось сформировать ответ.").strip()
+        except Exception:
+            fallback = await self.client.responses.create(
+                model="gpt-4.1-mini",
+                input=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {
+                        "role": "system",
+                        "content": f"Контекст из Notion:\n{notion_snapshot}",
+                    },
+                    {"role": "user", "content": user_text},
+                ],
+                temperature=0.4,
+            )
+            return (fallback.output_text or "Не удалось сформировать ответ.").strip()
 
     async def transcribe_voice(self, audio_bytes: bytes, filename: str = "voice.ogg") -> str:
         transcript = await self.client.audio.transcriptions.create(
@@ -54,18 +69,20 @@ class CoAgent:
             f"Разрешение на изменения в Notion: {'yes' if allow_notion_actions else 'no'}; если no, actions=[]"
         )
 
-        response = await self.client.responses.create(
-            model=self.model,
-            input=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "system", "content": planning_prompt},
-                {"role": "system", "content": f"Контекст из Notion:\n{notion_snapshot}"},
-                {"role": "user", "content": user_text},
-            ],
-            temperature=0.2,
-        )
-
-        raw = (response.output_text or "").strip()
+        try:
+            response = await self.client.responses.create(
+                model=self.model,
+                input=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "system", "content": planning_prompt},
+                    {"role": "system", "content": f"Контекст из Notion:\n{notion_snapshot}"},
+                    {"role": "user", "content": user_text},
+                ],
+                temperature=0.2,
+            )
+            raw = (response.output_text or "").strip()
+        except Exception:
+            return {"reply": await self.reply(user_text, notion_snapshot), "actions": []}
         parsed = _safe_json(raw)
         if not isinstance(parsed, dict):
             return {"reply": await self.reply(user_text, notion_snapshot), "actions": []}

@@ -11,6 +11,7 @@ class Settings:
     telegram_bot_token: str
     telegram_allowed_user_id: int | None
     telegram_allowed_username: str | None
+    bot_timezone: str
     openai_api_key: str
     openai_model: str
     notion_token: str
@@ -46,6 +47,7 @@ def load_settings() -> Settings:
         telegram_bot_token=telegram_bot_token,
         telegram_allowed_user_id=allowed_user,
         telegram_allowed_username=allowed_username,
+        bot_timezone=os.getenv("BOT_TIMEZONE", "Europe/Moscow").strip(),
         openai_api_key=openai_api_key,
         openai_model=os.getenv("OPENAI_MODEL", "gpt-5.3").strip(),
         notion_token=notion_token,
